@@ -1,4 +1,4 @@
 # Marketing-Mixed-Modeling
 My first attempt at an MMM in Python
 
-This was a really rough implementation of an MMM. I believe all of our methodology is valid here, despite some of the coefficients for the regression being a bit off. I suspect this is something that we could have done better with stronger domain knowledge
+I have not attached the actual data because it is way too large, but I have attached the Python notebook and R markdown files that enable you to follow along. In the Python notebook, we explore and clean the data for future modeling. Using the output from that notebook, in R we build the MMM models to assess the effect of the different marketing vehicles on grocery store sales.
