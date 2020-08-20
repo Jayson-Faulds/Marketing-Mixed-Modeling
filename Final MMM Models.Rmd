@@ -1,0 +1,650 @@
+---
+title: "MKT Project 4"
+output: html_notebook
+---
+
+We transition over to R here because it is easier to do certain calculations, and much better for model diagnostics.
+
+```{r}
+library(dplyr)
+library(data.table)
+# import the data outputted from Python
+complete_df <- read.csv('r_df.csv')
+complete_df
+```
+
+Here we look at the distribution for paid search and web display impressions to see if there is any data transformation needed
+
+```{r}
+hist(complete_df$paid_search_impressions)
+as.data.frame(table(complete_df$web_display_impressions))
+```
+
+For web display, there only seem to be a small handful of values that it takes on. For this reason, instead of treating it as continuous, we will factor the variable to allow for nonlinearity
+
+```{r}
+complete_df$web_display_impressions <- factor(complete_df$web_display_impressions)
+```
+
+We need to relevel our holiday factor so that "No Holiday" is the default value in our model 
+
+```{r}
+complete_df$holiday <- factor(complete_df$holiday)
+complete_df$holiday <- relevel(complete_df$holiday, ref = 'No holiday')
+```
+
+
+We need to convert the pure radio and TV GRP values into adstock, in order to incorporate the lagging effect. Before we can do this, we need to calculate the decay factor using the provided half lives:
+
+```{r}
+tv_decay <- 1 - (0.5)^(1/8)
+radio_decay <- 1 - (0.5)^(1/4)
+tv_decay
+radio_decay
+```
+
+Next we calculate the adstock GRP values for TV and radio using the following function:
+
+```{r}
+# the recursive method allows the value from the previous row to be incorporated to the calculation of the current row
+complete_df$Adstock_TV <- as.numeric(stats::filter(x = complete_df$TV.GRP, filter = tv_decay, method = 'recursive'))
+complete_df$Adstock_Radio <- as.numeric(stats::filter(x = complete_df$Radio.GRP, filter = radio_decay, method = 'recursive'))
+complete_df[67:77, c('TV.GRP', 'Adstock_TV')] # compare the GRP to the adstock GRP
+```
+
+Next, we need to convert our adstocked GRP values into reach using the provided formula:
+
+```{r}
+complete_df$TV_reach <- 0.95*(1 - exp(-0.02*complete_df$Adstock_TV))
+complete_df$Radio_reach <- 0.9*(1 - exp(-0.025*complete_df$Adstock_Radio))
+complete_df[67:77, c('Adstock_TV', 'TV_reach')] # compare the adstock to the reach
+```
+
+Convert flyer, store display, and email variables into indicators
+
+```{r}
+complete_df$flyer <- factor(complete_df$flyer)
+complete_df$store_display <- factor(complete_df$store_display)
+complete_df$email <- factor(complete_df$email)
+```
+
+Let's look at the distribution for the seasonality variable to see if we need a transformation
+
+```{r}
+hist(complete_df$seas_index) # none of the transformations look great so we will stick with the original
+hist(log(complete_df$seas_index))
+hist(sqrt(complete_df$seas_index))
+hist(complete_df$seas_index^(1/3))
+```
+
+
+Split the data into separate products so that we can do modeling for each product individually
+
+```{r}
+product_1 <- complete_df[complete_df$prod_id == 138936951, ]
+product_2 <- complete_df[complete_df$prod_id == 138936952, ]
+product_3 <- complete_df[complete_df$prod_id == 138936953, ]
+```
+
+Next we take a look at the dependent variable distribution
+
+```{r}
+hist(product_1$sale_qty) # this distribution looks only slightly skewed
+hist(product_2$sale_qty) # slightly skewed as well
+hist(product_3$sale_qty) # this is quite skewed
+```
+
+Products 2 and 3 look pretty good after taking the log transformation, Product 1 looks better without
+
+```{r}
+hist(log(product_1$sale_qty)) # no
+hist(log(product_2$sale_qty)) # yes
+hist(log(product_3$sale_qty)) # yes
+```
+
+Make the transformations for the dependent variable
+
+```{r}
+product_1$sale_qty_log <- log(product_1$sale_qty)
+product_2$sale_qty_log <- log(product_2$sale_qty)
+product_3$sale_qty_log <- log(product_3$sale_qty)
+max1 <- max(product_1$sale_qty)*1.15
+max2 <- max(product_2$sale_qty)*1.15
+max3 <- max(product_3$sale_qty)*1.15
+product_1$sale_qty_logit <- product_1$sale_qty/max1
+product_2$sale_qty_logit <- product_2$sale_qty/max2
+product_3$sale_qty_logit <- product_3$sale_qty/max3
+product_1$sale_qty_logit <- log(product_1$sale_qty_logit/(1 - product_1$sale_qty_logit))
+product_2$sale_qty_logit <- log(product_2$sale_qty_logit/(1 - product_2$sale_qty_logit))
+product_3$sale_qty_logit <- log(product_3$sale_qty_logit/(1 - product_3$sale_qty_logit))
+```
+
+Take a look to see if the shelf price variable needs to be transformed
+
+```{r}
+hist(product_1$list_price)
+hist(product_2$list_price)
+hist(product_3$list_price) # these all seem pretty balanced
+```
+
+Now let's check the discount variable
+
+```{r}
+hist(product_1$discount)
+hist(product_2$discount)
+hist(product_3$discount)
+```
+
+Let's try some transformations to see if we could normalize the discount variable
+
+```{r}
+hist((product_1$discount)^(1/3))
+hist((product_2$discount)^(1/3))
+hist((product_3$discount)^(1/3))
+hist(log(product_1$discount) + 0.0001) # it is not perfect but taking the log seems to work somewhat well
+hist(log(product_2$discount) + 0.0001)
+hist(log(product_3$discount) + 0.0001)
+```
+
+Make the transformations to discount variable
+
+```{r}
+product_1$discount <- log(product_1$discount + 0.0001)
+product_2$discount <- log(product_2$discount + 0.0001)
+product_3$discount <- log(product_3$discount + 0.0001)
+```
+
+Next we fit our three models. Note that the store display value is removed from model 1 because product 1 was never featured via store display
+
+```{r}
+mod1a <- lm(sale_qty ~ seas_index + holiday + list_price + discount + flyer + email + web_display_impressions + paid_search_impressions + TV_reach + Radio_reach, data = product_1) 
+
+mod1b <- lm(sale_qty_log ~ seas_index + holiday + list_price + discount + flyer + email + web_display_impressions + paid_search_impressions + TV_reach + Radio_reach, data = product_1)
+
+mod1c <- lm(sale_qty_logit ~ seas_index + holiday + list_price + discount + flyer + email + web_display_impressions + paid_search_impressions + TV_reach + Radio_reach, data = product_1)
+
+mod2a <- lm(sale_qty ~ seas_index + holiday + list_price + discount + flyer + store_display + email + web_display_impressions + paid_search_impressions + TV_reach + Radio_reach, data = product_2)
+
+mod2b <- lm(sale_qty_log ~ seas_index + holiday + list_price + discount + flyer + store_display + email + web_display_impressions + paid_search_impressions + TV_reach + Radio_reach, data = product_2)
+
+mod2c <- lm(sale_qty_logit ~ seas_index + holiday + list_price + discount + flyer + store_display + email + web_display_impressions + paid_search_impressions + TV_reach + Radio_reach, data = product_2)
+
+mod3a <- lm(sale_qty ~ seas_index + holiday + list_price + discount + flyer + store_display + email + web_display_impressions + paid_search_impressions + TV_reach + Radio_reach, data = product_3)
+
+mod3b <- lm(sale_qty_log ~ seas_index + holiday + list_price + discount + flyer + store_display + email + web_display_impressions + paid_search_impressions + TV_reach + Radio_reach, data = product_3)
+
+mod3c <- lm(sale_qty_logit ~ seas_index + holiday + list_price + discount + flyer + store_display + email + web_display_impressions + paid_search_impressions + TV_reach + Radio_reach, data = product_3)
+```
+
+Let's take a look at the model summaries for our first product
+
+```{r}
+summary(mod1a)
+```
+
+The summary outputs above tell us some diagnostics, and now we are going to obtain some more, starting with MAPE
+
+```{r}
+preds <- predict(mod1a)
+pred_df <- data.frame(product_1$sale_qty, preds)
+names(pred_df) <- c('Y', 'preds')
+pred_df$percent_err <- abs((pred_df$preds - pred_df$Y)/pred_df$Y)
+mape1a <- mean(pred_df$percent_err)
+mape1a
+```
+
+Next we do the Durbin-Watson test for Autocorellation
+
+```{r}
+library(lmtest)
+dwtest(mod1a, alternative = 'two.sided')
+```
+
+
+--------------------------------------------------------------------------------------------------------
+
+```{r}
+summary(mod1b)
+```
+
+```{r}
+preds <- predict(mod1b)
+pred_df <- data.frame(product_1$sale_qty_log, preds)
+names(pred_df) <- c('Y', 'preds')
+pred_df$percent_err <- abs((pred_df$preds - pred_df$Y)/pred_df$Y)
+mape1b <- mean(pred_df$percent_err)
+mape1b
+```
+
+```{r}
+dwtest(mod1b, alternative = 'two.sided')
+```
+
+
+------------------------------------------------------------------------------------------------------------
+
+```{r}
+summary(mod1c)
+```
+
+```{r}
+preds <- predict(mod1c)
+pred_df <- data.frame(product_1$sale_qty_logit, preds)
+names(pred_df) <- c('Y', 'preds')
+pred_df$percent_err <- abs((pred_df$preds - pred_df$Y)/pred_df$Y)
+mape1c <- mean(pred_df$percent_err)
+mape1c
+```
+
+```{r}
+dwtest(mod1c, alternative = 'two.sided')
+```
+
+
+----------------------------------------------------------------------------------------------------------------
+
+```{r}
+product_1$holiday[product_1$holiday == 'XMAS'] <- 'No holiday'
+product_1$holiday[product_1$holiday == 'PrXMAS'] <- 'No holiday'
+product_1$holiday[product_1$holiday == 'NEWYEAR'] <- 'No holiday'
+mod1c_new <- lm(sale_qty_logit ~ seas_index + holiday + list_price + discount + flyer + email + web_display_impressions + paid_search_impressions + TV_reach + Radio_reach, data = product_1)
+summary(mod1c_new)
+```
+
+```{r}
+preds <- predict(mod1c_new)
+pred_df <- data.frame(product_1$sale_qty, preds)
+names(pred_df) <- c('Y', 'preds')
+pred_df$percent_err <- abs((pred_df$preds - pred_df$Y)/pred_df$Y)
+mape1c_new <- mean(pred_df$percent_err)
+mape1c_new
+```
+
+Now we will gather the VIF figures for the features in the model (Can't calculate VIF until perfect correlation between the variables is accounted for)
+
+```{r}
+library(regclass)
+VIF(mod1c_new) # TV and Radio reach appear to have noticeable relationships with other variables in the feature set
+```
+
+```{r}
+dwtest(mod1c_new, alternative = 'two.sided')
+```
+
+
+-----------------------------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------
+
+```{r}
+summary(mod2a)
+```
+
+```{r}
+preds <- predict(mod2a)
+pred_df <- data.frame(product_1$sale_qty, preds)
+names(pred_df) <- c('Y', 'preds')
+pred_df$percent_err <- abs((pred_df$preds - pred_df$Y)/pred_df$Y)
+mape2a <- mean(pred_df$percent_err)
+mape2a
+```
+
+```{r}
+dwtest(mod2a, alternative = 'two.sided')
+```
+
+
+---------------------------------------------------------------------------------------------------------------------
+
+```{r}
+summary(mod2b)
+```
+
+
+```{r}
+preds <- predict(mod2b)
+pred_df <- data.frame(product_1$sale_qty_log, preds)
+names(pred_df) <- c('Y', 'preds')
+pred_df$percent_err <- abs((pred_df$preds - pred_df$Y)/pred_df$Y)
+mape2b <- mean(pred_df$percent_err)
+mape2b
+```
+
+```{r}
+dwtest(mod2b, alternative = 'two.sided')
+```
+
+
+--------------------------------------------------------------------------------------------------------------
+
+```{r}
+summary(mod2c)
+```
+
+```{r}
+preds <- predict(mod2c)
+pred_df <- data.frame(product_1$sale_qty_logit, preds)
+names(pred_df) <- c('Y', 'preds')
+pred_df$percent_err <- abs((pred_df$preds - pred_df$Y)/pred_df$Y)
+mape2c <- mean(pred_df$percent_err)
+mape2c
+```
+
+```{r}
+dwtest(mod2c, alternative = 'two.sided')
+```
+
+
+----------------------------------------------------------------------------------------------------------------------
+
+We repeat the same process as above, where we select the best model, and then re-evaluate using the email variable. In this case, because the effect of NEWYEAR is statistically significant, we will adjust the dependent variable appropriately by the predicted coefficient for that holiday indicator. This will hold the holiday effect constant, while allowing us to further test for the effect of the email.
+
+```{r}
+product_2$sale_qty[product_2$holiday == 'NEWYEAR'] <- product_2$sale_qty - 43 # this is the coefficient for new years
+product_2$holiday[product_2$holiday == 'XMAS'] <- 'No holiday'
+product_2$holiday[product_2$holiday == 'PrXMAS'] <- 'No holiday'
+product_2$holiday[product_2$holiday == 'NEWYEAR'] <- 'No holiday'
+mod2a_new <- lm(sale_qty ~ seas_index + holiday + list_price + discount + flyer + email + web_display_impressions + paid_search_impressions + TV_reach + store_display + Radio_reach, data = product_2)
+summary(mod2a_new)
+```
+
+```{r}
+preds <- predict(mod2a_new)
+pred_df <- data.frame(product_1$sale_qty, preds)
+names(pred_df) <- c('Y', 'preds')
+pred_df$percent_err <- abs((pred_df$preds - pred_df$Y)/pred_df$Y)
+mape2a_new <- mean(pred_df$percent_err)
+mape2a_new
+```
+
+```{r}
+VIF(mod2a_new)
+```
+
+```{r}
+dwtest(mod2a_new, alternative = 'two.sided')
+```
+
+
+------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------
+
+```{r}
+summary(mod3a)
+```
+
+```{r}
+preds <- predict(mod3a)
+pred_df <- data.frame(product_3$sale_qty, preds)
+names(pred_df) <- c('Y', 'preds')
+pred_df$percent_err <- abs((pred_df$preds - pred_df$Y)/pred_df$Y)
+mape3a <- mean(pred_df$percent_err)
+mape3a
+```
+
+```{r}
+dwtest(mod3a, alternative = 'two.sided')
+```
+
+
+---------------------------------------------------------------------------------------------------------------------------
+
+```{r}
+summary(mod3b)
+```
+
+```{r}
+preds <- predict(mod3b)
+pred_df <- data.frame(product_3$sale_qty_log, preds)
+names(pred_df) <- c('Y', 'preds')
+pred_df$percent_err <- abs((pred_df$preds - pred_df$Y)/pred_df$Y)
+mape3b <- mean(pred_df$percent_err)
+mape3b
+```
+
+```{r}
+dwtest(mod3b, alternative = 'two.sided')
+```
+
+
+------------------------------------------------------------------------------------------------------------------------
+
+```{r}
+summary(mod3c)
+```
+
+
+```{r}
+preds <- predict(mod3c)
+pred_df <- data.frame(product_3$sale_qty_logit, preds)
+names(pred_df) <- c('Y', 'preds')
+pred_df$percent_err <- abs((pred_df$preds - pred_df$Y)/pred_df$Y)
+mape3c <- mean(pred_df$percent_err)
+mape3c
+```
+
+```{r}
+dwtest(mod3c, alternative = 'two.sided')
+```
+
+
+-----------------------------------------------------------------------------------------------------------------------
+
+```{r}
+product_3$holiday[product_3$holiday == 'XMAS'] <- 'No holiday'
+product_3$holiday[product_3$holiday == 'PrXMAS'] <- 'No holiday'
+product_3$holiday[product_3$holiday == 'NEWYEAR'] <- 'No holiday'
+mod3a_new <- lm(sale_qty ~ seas_index + holiday + list_price + discount + flyer + email + web_display_impressions + paid_search_impressions + store_display + TV_reach + Radio_reach, data = product_3)
+summary(mod3a_new)
+```
+
+
+```{r}
+preds <- predict(mod3a_new)
+pred_df <- data.frame(product_3$sale_qty, preds)
+names(pred_df) <- c('Y', 'preds')
+pred_df$percent_err <- abs((pred_df$preds - pred_df$Y)/pred_df$Y)
+mape3a_new <- mean(pred_df$percent_err)
+mape3a_new
+```
+
+
+```{r}
+VIF(mod3a_new)
+```
+
+```{r}
+dwtest(mod3a, alternative = 'two.sided')
+```
+
+
+
+# Dueto Calculation
+
+## Product 1
+
+```{r}
+library(dummies)
+# Get a dataframe of all causal values (factor into dummy)
+
+n_product_1<-data.frame(sapply(product_1, as.character), stringsAsFactors=FALSE)
+
+d_product_1<-cbind(
+                    n_product_1[,c(2,4,10)],
+                   dummy(n_product_1$holiday, sep = ".")[,-1],
+                   n_product_1[,c(7,8)],
+                   dummy(n_product_1$flyer, sep = ".")[,-1],
+                   dummy(n_product_1$email, sep = ".")[,-1],
+                   dummy(n_product_1$web_display_impressions, sep = ".")[,-1],
+                   n_product_1[,c(14,20,21)])
+
+
+d_product_1<-data.frame(sapply(d_product_1, as.numeric))
+# Get all coefficients
+coeff1<-mod1c_new$coefficients[-1]
+```
+
+```{r}
+# Calculate sale_qty_logit_pred
+result1<-cbind(product_1[,c(2,4)],
+               data.frame(mapply(`*`,d_product_1[,3:29],coeff1)))
+result1$intercept<-mod1c_new$coefficients[1]
+result1$sale_qty_logit_pred<-rowSums(result1[,3:30])
+```
+
+```{r}
+# Calculate sale_qty_logit_pred based on X-base
+## Deal with all other variables
+result1_new<-result1$sale_qty_logit_pred-result1[,-c(1,2,3,19,30,31,32,33)]
+
+## Deal with seas_index and list_price (see base as the average)
+result1_new$seas_index<-result1$sale_qty_logit_pred-result1$seas_index+coeff1['seas_index']*mean(product_1$seas_index)
+result1_new$list_price<-result1$sale_qty_logit_pred-result1$list_price+coeff1['list_price']*mean(product_1$list_price)
+```
+
+
+```{r}
+# Define a function to transfrom back to sale_qty
+trans_f<-function(y){
+  return(max1*exp(y)/(1+exp(y)))
+}
+
+# Tranform result1_new back to sale_qty_new
+sale_qty_new<-as.data.frame(lapply(result1_new,trans_f))
+
+
+result1$sale_qty_pred<-trans_f(result1$sale_qty_logit_pred)
+
+## calculate dueto
+sale_qty_new<-result1$sale_qty_pred-sale_qty_new
+
+```
+
+
+```{r}
+## make a summary of all kinds of dueto
+dueto1<-cbind(product_1[,c(2,4)],
+              sale_qty_new[,c(16,17,18,23,24,25,26,27)],
+              rowSums(sale_qty_new[,1:15]),
+                     rowSums(sale_qty_new[,19:22]))
+              
+colnames(dueto1)<-c(colnames(dueto1)[1:3],"flyer","email",colnames(dueto1)[6:10],"holiday","web_display")
+```
+
+
+```{r}
+# Rescale dueto
+dueto1_rescale<-dueto1[,3:12]/rowSums(dueto1[,3:12])*dueto1$sale_qty
+
+
+dueto1_rescale<-cbind(product_1[,c(2,4)],
+                      dueto1_rescale)
+
+# Check whether all qty are allocated to all duetos
+sum(rowSums(dueto1_rescale[,-c(1,2)])-dueto1_rescale$sale_qty)
+
+```
+
+
+```{r}
+fwrite(dueto1_rescale,'dueto1.csv')
+```
+
+
+## Product 2
+
+```{r}
+# deal with numerical variables
+d_product_2<-product_2[,c(2,4,10,7,8,14,20,21,11,12,13,9,15)]
+coeff2<-mod2a_new$coefficients
+coeff2_n<-coeff2[c(2,18,19,26,27,29)]
+dueto2_n<-data.frame(mapply(`*`,d_product_2[,3:8],coeff2_n))
+```
+
+
+```{r}
+# deal with factors
+dueto2_f<-d_product_2[,c(9,10,11,13)]
+levels(dueto2_f$flyer) <- c(0,coeff2["flyer1"])
+levels(dueto2_f$store_display) <- c(0,coeff2["store_display1"])
+levels(dueto2_f$email) <- c(0,coeff2["email1"])
+levels(dueto2_f$web_display_impressions)<-c(0,coeff3[22:25])
+
+dueto2_f<-data.frame(sapply(dueto2_f, as.character),stringsAsFactors=FALSE)
+dueto2_f<-data.frame(sapply(dueto2_f, as.numeric))
+```
+
+```{r}
+# deal with holiday
+holiday2<-as.data.frame(coeff2[3:17])
+holiday2$holidaynames<-substr(row.names(holiday2),8,100)
+colnames(holiday2)<-c('holiday','holidaynames')
+
+dueto2_h<-data.frame(sapply(d_product_2[,12], as.character), stringsAsFactors=FALSE)
+colnames(dueto2_h)<-c('holidaynames')
+
+dueto2_h<-dueto2_h%>%
+  left_join(holiday2,by="holidaynames")
+
+dueto2_h[is.na(dueto2_h)] <- 0
+dueto2_h<-dueto2_h[,2]
+```
+
+```{r}
+# Combine all duetos in one dataframe
+dueto2<-cbind(d_product_2[,c(1,2)],dueto2_f,dueto2_n,dueto2_h)
+dueto2$adj<-dueto2$sale_qty-rowSums(dueto2[,3:13])
+fwrite(dueto2,'dueto2.csv')
+```
+
+## Product 3
+```{r}
+# deal with numerical variables
+d_product_3<-product_3[,c(2,4,10,7,8,14,20,21,11,12,13,9,15)]
+coeff3<-mod3a_new$coefficients
+coeff3_n<-coeff3[c(2,17,18,25,27,28)]
+dueto3_n<-data.frame(mapply(`*`,d_product_3[,3:8],coeff3_n))
+```
+
+
+```{r}
+# deal with factors
+dueto3_f<-d_product_3[,c(9,10,11,13)]
+levels(dueto3_f$flyer) <- c(0,coeff3["flyer1"])
+levels(dueto3_f$store_display) <- c(0,coeff3["store_display1"])
+levels(dueto3_f$email) <- c(0,coeff3["email1"])
+levels(dueto3_f$web_display_impressions)<-c(0,coeff3[22:25])
+
+dueto3_f<-data.frame(sapply(dueto3_f, as.character),stringsAsFactors=FALSE)
+dueto3_f<-data.frame(sapply(dueto3_f, as.numeric))
+```
+
+```{r}
+# deal with holiday
+holiday3<-as.data.frame(coeff3[9:16])
+holiday3$holidaynames<-substr(row.names(holiday3),8,100)
+colnames(holiday3)<-c('holiday','holidaynames')
+
+dueto3_h<-data.frame(sapply(d_product_3[,12], as.character), stringsAsFactors=FALSE)
+colnames(dueto3_h)<-c('holidaynames')
+
+dueto3_h<-dueto3_h%>%
+  left_join(holiday3,by="holidaynames")
+
+dueto3_h[is.na(dueto3_h)] <- 0
+dueto3_h<-dueto3_h[,2]
+```
+
+```{r}
+# Combine all duetos in one dataframe
+dueto3<-cbind(d_product_3[,c(1,2)],dueto3_f,dueto3_n,dueto3_h)
+dueto3$adj<-dueto3$sale_qty-rowSums(dueto3[,3:13])
+fwrite(dueto3,'dueto3.csv')
+```
+
+
+
+
+
+
+
+
